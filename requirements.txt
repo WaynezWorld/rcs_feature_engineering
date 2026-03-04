@@ -1,0 +1,5 @@
+# Minimal requirements for run_feature_engineering.py
+pandas>=1.5.0
+numpy>=1.24.0
+pyyaml>=6.0
+python-dotenv>=1.0.0

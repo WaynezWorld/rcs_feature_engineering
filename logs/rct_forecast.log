@@ -1,0 +1,5 @@
+2026-03-03 10:50:58,305 - rct_forecast - INFO - Logging setup complete. Level: INFO, File: logs/rct_forecast.log
+2026-03-03 10:50:58,305 - rct_forecast - INFO - Feature Engineering Script
+2026-03-03 10:50:58,305 - rct_forecast - INFO -   Config  : config/default.yml
+2026-03-03 10:50:58,306 - rct_forecast - INFO -   Input   : path\to\prepared.csv
+2026-03-03 10:50:58,306 - rct_forecast - ERROR - Input file not found: path\to\prepared.csv
