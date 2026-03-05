@@ -1,4 +1,0 @@
-config
-logs
-rct_forecast
-venv
