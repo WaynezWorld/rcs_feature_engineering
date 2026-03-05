@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: rcs-feature-engineering
-Version: 0.1.0
-Summary: RCS feature engineering module (rct_forecast.feature_engineering)
-Requires-Python: >=3.10
-Requires-Dist: pandas>=1.5
-Requires-Dist: numpy>=1.24
-Requires-Dist: pyyaml>=6.0
