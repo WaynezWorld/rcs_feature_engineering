@@ -172,14 +172,6 @@ def handle_outliers(
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
-    from prophet import Prophet  # type: ignore[import-untyped]
-    PROPHET_AVAILABLE = True
-except ImportError:
-    PROPHET_AVAILABLE = False
-
-try:
-    from sklearn.linear_model import LinearRegression  # type: ignore[import-untyped]
-    from sklearn.ensemble import RandomForestRegressor  # type: ignore[import-untyped]
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # type: ignore[import-untyped]
     SKLEARN_AVAILABLE = True
 except ImportError:
@@ -190,24 +182,6 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-
-try:
-    from lightgbm import LGBMRegressor  # type: ignore[import-untyped]
-    LIGHTGBM_AVAILABLE = True
-except ImportError:
-    LIGHTGBM_AVAILABLE = False
-
-try:
-    from catboost import CatBoostRegressor  # type: ignore[import-untyped]
-    CATBOOST_AVAILABLE = True
-except ImportError:
-    CATBOOST_AVAILABLE = False
-
-try:
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing as _HWModel  # type: ignore[import-untyped]
-    HOLTWINTERS_AVAILABLE = True
-except ImportError:
-    HOLTWINTERS_AVAILABLE = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,59 +247,10 @@ class ForecastModel(ABC):
         self.is_fitted = model_data["is_fitted"]
 
 
-class ProphetModel(ForecastModel):
-    """Prophet-based forecasting model"""
-
-    def __init__(self, name: str = "prophet", **kwargs):
-        super().__init__(name, **kwargs)
-        if not PROPHET_AVAILABLE:
-            raise ImportError("Prophet is not available. Install with: pip install prophet")
-
-    def fit(self, df: pd.DataFrame, target_column: str,
-            date_column: str, **kwargs) -> "ProphetModel":
-        prophet_df = df[[date_column, target_column]].copy()
-        prophet_df.columns = ["ds", "y"]
-        prophet_df = prophet_df.dropna()
-        prophet_params = {
-            "yearly_seasonality": self.params.get("yearly_seasonality", True),
-            "weekly_seasonality": self.params.get("weekly_seasonality", False),
-            "daily_seasonality": self.params.get("daily_seasonality", False),
-            "growth": self.params.get("growth", "linear"),
-        }
-        self.model = Prophet(**prophet_params)
-        additional_regressors = self.params.get("additional_regressors", [])
-        for regressor in additional_regressors:
-            if regressor in df.columns:
-                self.model.add_regressor(regressor)
-                prophet_df[regressor] = df[regressor]
-        self.model.fit(prophet_df)
-        self.is_fitted = True
-        return self
-
-    def predict(self, df: Optional[pd.DataFrame] = None,
-                periods: int = 12) -> pd.DataFrame:
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before prediction")
-        if df is not None:
-            future_df = df.copy()
-            if "ds" not in future_df.columns:
-                future_df.rename(columns={future_df.columns[0]: "ds"}, inplace=True)
-        else:
-            future_df = self.model.make_future_dataframe(periods=periods, freq="MS")
-        forecast = self.model.predict(future_df)
-        result_columns = ["ds", "yhat", "yhat_lower", "yhat_upper"]
-        return forecast[result_columns].rename(columns={
-            "ds": "date",
-            "yhat": "prediction",
-            "yhat_lower": "prediction_lower",
-            "yhat_upper": "prediction_upper",
-        })
-
-
 class SklearnModel(ForecastModel):
     """Scikit-learn based forecasting model"""
 
-    def __init__(self, name: str = "sklearn", model_type: str = "linear", **kwargs):
+    def __init__(self, name: str = "sklearn", model_type: str = "ridge", **kwargs):
         super().__init__(name, **kwargs)
         if not SKLEARN_AVAILABLE:
             raise ImportError("Scikit-learn is not available")
@@ -393,101 +318,13 @@ class SklearnModel(ForecastModel):
         })
 
 
-class HoltWintersModel(ForecastModel):
-    """Holt-Winters / Exponential Smoothing forecasting model."""
-
-    def __init__(self, name: str = "holt_winters", **kwargs):
-        super().__init__(name, **kwargs)
-        if not HOLTWINTERS_AVAILABLE:
-            raise ImportError(
-                "statsmodels is not available. Install with: pip install statsmodels"
-            )
-        self.date_column: Optional[str] = None
-        self._freq: str = "MS"
-
-    def fit(self, df: pd.DataFrame, target_column: str,
-            date_column: str, **kwargs) -> "HoltWintersModel":
-        self.date_column = date_column
-        ts = df.set_index(date_column)[target_column].sort_index().astype(float)
-        if not isinstance(ts.index, pd.DatetimeIndex):
-            ts.index = pd.DatetimeIndex(ts.index)
-        inferred = pd.infer_freq(ts.index)
-        if inferred is not None:
-            ts.index = pd.DatetimeIndex(ts.index, freq=inferred)
-        else:
-            ts.index = pd.DatetimeIndex(ts.index, freq=self._freq)
-        if len(ts) < 4:
-            raise ValueError(f"HoltWinters requires at least 4 data points, got {len(ts)}")
-        seasonal_periods = self.params.get("seasonal_periods", 12)
-        trend = self.params.get("trend", "add")
-        seasonal = self.params.get("seasonal", "add")
-        damped_trend = self.params.get("damped_trend", False)
-        if len(ts) < 2 * seasonal_periods:
-            seasonal = None
-        hw = _HWModel(
-            ts,
-            trend=trend,
-            seasonal=seasonal,
-            seasonal_periods=seasonal_periods if seasonal else None,
-            damped_trend=damped_trend,
-        )
-        self.model = hw.fit(optimized=True)
-        self.is_fitted = True
-        return self
-
-    def predict(self, df: Optional[pd.DataFrame] = None,
-                periods: int = 12) -> pd.DataFrame:
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before prediction")
-        forecast = self.model.forecast(periods)
-        return pd.DataFrame({
-            "date": forecast.index,
-            "prediction": forecast.values,
-        })
-
-
-class EnsembleModel(ForecastModel):
-    """Simple weighted-average ensemble of two sklearn-compatible models."""
-
-    def __init__(self, name: str = "ensemble", **kwargs):
-        super().__init__(name, **kwargs)
-        self.weight_a: float = float(kwargs.get("weight_a", 0.5))
-        self.model_a_obj: SklearnModel = SklearnModel(model_type=kwargs.get("model_a", "ridge"))
-        self.model_b_obj: SklearnModel = SklearnModel(model_type=kwargs.get("model_b", "xgboost"))
-        self.date_column: Optional[str] = None
-
-    def fit(self, df: pd.DataFrame, target_column: str,
-            date_column: str, **kwargs) -> "EnsembleModel":
-        self.date_column = date_column
-        self.model_a_obj.fit(df, target_column, date_column, **kwargs)
-        self.model_b_obj.fit(df, target_column, date_column, **kwargs)
-        self.feature_columns = self.model_a_obj.feature_columns
-        self.is_fitted = True
-        return self
-
-    def predict(self, df: Optional[pd.DataFrame] = None,
-                periods: int = 12) -> pd.DataFrame:
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before prediction")
-        pred_a = self.model_a_obj.predict(df, periods)
-        pred_b = self.model_b_obj.predict(df, periods)
-        result = pred_a.copy()
-        result["prediction"] = (
-            self.weight_a * np.asarray(pred_a["prediction"].values)
-            + (1 - self.weight_a) * np.asarray(pred_b["prediction"].values)
-        )
-        return result
-
-
 # ─── Register built-in models ─────────────────────────────────────────────────
 if SKLEARN_AVAILABLE:
-    register_model("linear", LinearRegression, available=True)
     register_model(
         "ridge",
         lambda **kw: __import__("sklearn.linear_model", fromlist=["Ridge"]).Ridge(**kw),
         available=True,
     )
-    register_model("random_forest", lambda **kw: RandomForestRegressor(**kw), available=True)
     register_model(
         "elastic_net",
         lambda **kw: __import__("sklearn.linear_model", fromlist=["ElasticNet"]).ElasticNet(**kw),
@@ -498,22 +335,11 @@ if SKLEARN_AVAILABLE:
         lambda **kw: __import__("sklearn.linear_model", fromlist=["Lasso"]).Lasso(**kw),
         available=True,
     )
-    register_model(
-        "bayesian_ridge",
-        lambda **kw: __import__("sklearn.linear_model", fromlist=["BayesianRidge"]).BayesianRidge(**kw),
-        available=True,
-    )
 else:
-    for _n in ("linear", "ridge", "random_forest", "elastic_net", "lasso", "bayesian_ridge"):
+    for _n in ("ridge", "elastic_net", "lasso"):
         register_model(_n, lambda **kw: None, available=False)
 
 register_model("xgboost", lambda **kw: XGBRegressor(**kw), available=XGBOOST_AVAILABLE)
-register_model("lightgbm", lambda **kw: LGBMRegressor(**kw), available=LIGHTGBM_AVAILABLE)
-register_model(
-    "catboost",
-    lambda **kw: CatBoostRegressor(verbose=0, **kw),
-    available=CATBOOST_AVAILABLE,
-)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -876,26 +702,17 @@ class TimeSeriesForecaster:
         assert self.train_data is not None
         assert self.validation_data is not None
 
-        model_type = self.config.get("forecasting.model_type", "prophet")
-        if model_type == "prophet":
-            prophet_config = self.config.get("forecasting.prophet", {}) or {}
-            self.model = ProphetModel(**prophet_config)
-        elif model_type == "xgboost":
+        model_type = self.config.get("forecasting.model_type", "xgboost")
+        if model_type == "xgboost":
             xgb_params = self._get_adaptive_xgb_params(len(self.train_data))
             self.model = SklearnModel(model_type="xgboost", **xgb_params)
-        elif model_type == "holt_winters":
-            hw_params = self.config.get("forecasting.holt_winters", {}) or {}
-            self.model = HoltWintersModel(**hw_params)
-        elif model_type == "ensemble":
-            ens_params = self.config.get("forecasting.ensemble", {}) or {}
-            self.model = EnsembleModel(**ens_params)
         elif model_type in _MODEL_REGISTRY:
             model_params = self.config.get(f"forecasting.{model_type}", {}) or {}
             self.model = SklearnModel(model_type=model_type, **model_params)
         else:
             raise ValueError(
                 f"Unsupported model type: {model_type}. "
-                f"Available: {['prophet', 'holt_winters', 'ensemble'] + available_models()}"
+                f"Available: {available_models()}"
             )
 
         agg_data = None
@@ -909,7 +726,7 @@ class TimeSeriesForecaster:
             hist = agg_data[[date_column, target_column]].copy()
             hist[date_column] = pd.to_datetime(hist[date_column])
             self._agg_history = hist
-        elif isinstance(self.model, (SklearnModel, EnsembleModel)) and len(self.train_data) > 0:
+        elif isinstance(self.model, SklearnModel) and len(self.train_data) > 0:
             self._agg_train_last = self.train_data.iloc[-1].to_dict()
             hist = self.train_data[[date_column, target_column]].copy()
             hist[date_column] = pd.to_datetime(hist[date_column])
@@ -931,18 +748,8 @@ class TimeSeriesForecaster:
         validation_df = self._prepare_eval_df(
             self.validation_data, target_column, date_column
         )
-        if isinstance(self.model, ProphetModel):
-            val_predictions = self.model.predict(
-                validation_df[[date_column]].rename(columns={date_column: "ds"})
-            )
-            y_pred = np.asarray(val_predictions["prediction"].values)
-        elif isinstance(self.model, HoltWintersModel):
-            n_periods = len(validation_df)
-            val_predictions = self.model.predict(None, n_periods)
-            y_pred = np.asarray(val_predictions["prediction"].values[:n_periods])
-        else:
-            val_predictions = self.model.predict(validation_df)
-            y_pred = np.asarray(val_predictions["prediction"].values)
+        val_predictions = self.model.predict(validation_df)
+        y_pred = np.asarray(val_predictions["prediction"].values)
         y_true = np.asarray(validation_df[target_column].values)
         val_dates = np.asarray(validation_df[date_column].values)
         if self.use_log_transform:
@@ -962,17 +769,7 @@ class TimeSeriesForecaster:
             periods = int(self.config.get("forecasting.forecast_horizon", 12) or 12)
         periods = int(periods)
 
-        if isinstance(self.model, HoltWintersModel):
-            predictions = self.model.predict(None, periods)
-            if self.use_log_transform and "prediction" in predictions.columns:
-                predictions["prediction"] = self._inverse_transform_target(
-                    np.asarray(predictions["prediction"].values)
-                )
-            return predictions
-
-        _needs_features = isinstance(self.model, (SklearnModel, EnsembleModel))
-
-        if future_df is None and _needs_features:
+        if future_df is None:
             forecast_start = self.config.get("forecasting.forecast_start")
             date_col = self._date_column or self.config.get("data_source.date_column", "date")
             target_col = self._target_column or self.config.get("data_source.amount_column", "Actual")
@@ -1000,10 +797,10 @@ class TimeSeriesForecaster:
         amount_col = self._target_column or self.config.get("data_source.amount_column", "Actual")
         date_col = self._date_column or self.config.get("data_source.date_column", "date")
 
-        if future_df is not None and _needs_features and self.group_by:
+        if future_df is not None and self.group_by:
             future_df = self._populate_future_features(future_df, amount_col, date_col)
 
-        if future_df is not None and _needs_features and self._agg_train_last:
+        if future_df is not None and self._agg_train_last:
             feature_cols = getattr(self.model, "feature_columns", None) or []
             for feature in feature_cols:
                 if feature not in future_df.columns:
@@ -1025,18 +822,8 @@ class TimeSeriesForecaster:
         if not self.model or not self.model.is_fitted:
             raise ValueError("Model must be fitted before evaluation")
         test_df = self._prepare_eval_df(df, target_column, date_column)
-        if isinstance(self.model, ProphetModel):
-            test_predictions = self.model.predict(
-                test_df[[date_column]].rename(columns={date_column: "ds"})
-            )
-            y_pred = np.asarray(test_predictions["prediction"].values)
-        elif isinstance(self.model, HoltWintersModel):
-            n_periods = len(test_df)
-            test_predictions = self.model.predict(None, n_periods)
-            y_pred = np.asarray(test_predictions["prediction"].values[:n_periods])
-        else:
-            test_predictions = self.model.predict(test_df)
-            y_pred = np.asarray(test_predictions["prediction"].values)
+        test_predictions = self.model.predict(test_df)
+        y_pred = np.asarray(test_predictions["prediction"].values)
         y_true = np.asarray(test_df[target_column].values)
         test_dates = np.asarray(test_df[date_column].values)
         if self.use_log_transform:
@@ -1087,18 +874,8 @@ class TimeSeriesForecaster:
         if not self.model or not self.model.is_fitted:
             raise ValueError("Model must be fitted before prediction")
         eval_df = self._prepare_eval_df(df, target_column, date_column)
-        if isinstance(self.model, ProphetModel):
-            predictions = self.model.predict(
-                eval_df[[date_column]].rename(columns={date_column: "ds"})
-            )
-            pred_values = np.asarray(predictions["prediction"].values)
-        elif isinstance(self.model, HoltWintersModel):
-            n_periods = len(eval_df)
-            predictions = self.model.predict(None, n_periods)
-            pred_values = np.asarray(predictions["prediction"].values[:n_periods])
-        else:
-            predictions = self.model.predict(eval_df)
-            pred_values = np.asarray(predictions["prediction"].values)
+        predictions = self.model.predict(eval_df)
+        pred_values = np.asarray(predictions["prediction"].values)
         if self.use_log_transform:
             pred_values = self._inverse_transform_target(pred_values)
         return pd.DataFrame({
@@ -1124,11 +901,8 @@ class TimeSeriesForecaster:
             pickle.dump(metadata, f)
 
     def load_model(self, path: str):
-        model_type = self.config.get("forecasting.model_type", "prophet")
-        if model_type == "prophet":
-            self.model = ProphetModel()
-        else:
-            self.model = SklearnModel(model_type=model_type)
+        model_type = self.config.get("forecasting.model_type", "xgboost")
+        self.model = SklearnModel(model_type=model_type)
         self.model.load_model(path)
         metadata_path = path.replace(".pkl", "_metadata.pkl")
         if Path(metadata_path).exists():
@@ -1851,7 +1625,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model", type=str,
-        choices=["xgboost", "lightgbm", "random_forest", "linear", "prophet"],
+        choices=["xgboost", "ridge", "elastic_net", "lasso"],
         default=None,
         help="Override model type from config",
     )
